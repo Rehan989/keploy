@@ -146,3 +146,7 @@ require (
 	github.com/yuin/goldmark v1.5.2 // indirect
 	github.com/yuin/goldmark-emoji v1.0.1 // indirect
 )
+
+require (
+	github.com/amikos-tech/go-chromadb v0.0.0-20240307123639-c9d1a5ba7d4c
+)

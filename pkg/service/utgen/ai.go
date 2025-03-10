@@ -9,10 +9,12 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"go.keploy.io/server/v2/config"
+	"go.keploy.io/server/v2/pkg/rag"
 	"go.keploy.io/server/v2/pkg/service"
 	"go.keploy.io/server/v2/utils"
 	"go.uber.org/zap"
@@ -28,6 +30,9 @@ type AIClient struct {
 	Logger            *zap.Logger
 	SessionID         string
 	FunctionUnderTest string
+	store             *rag.ChromaStore
+	indexer           *rag.CodeIndexer
+	embedder          *rag.EmbeddingGenerator
 }
 
 type Prompt struct {
@@ -378,5 +383,84 @@ func (ai *AIClient) SendCoverageUpdate(ctx context.Context, sessionID string, ol
 	}
 
 	ai.Logger.Debug("Coverage update sent successfully", zap.String("session_id", sessionID))
+	return nil
+}
+
+// InitializeRAG initializes the RAG components for semantic code search
+func (ai *AIClient) InitializeRAG(ctx context.Context, codeRoot string) error {
+	// Create embedding generator using the same API key
+	ai.embedder = rag.NewEmbeddingGenerator(ai.APIKey)
+
+	// Create ChromaDB store
+	persistDir := filepath.Join(os.TempDir(), "keploy-chromadb")
+	store, err := rag.NewChromaStore(ctx, persistDir, "keploy-code-snippets", ai.embedder)
+	if err != nil {
+		return fmt.Errorf("failed to create ChromaDB store: %v", err)
+	}
+	ai.store = store
+
+	// Create code indexer
+	ai.indexer = rag.NewCodeIndexer(store, codeRoot)
+	return nil
+}
+
+// IndexCodebase indexes the entire codebase for semantic search
+func (ai *AIClient) IndexCodebase(ctx context.Context) error {
+	if ai.indexer == nil {
+		return fmt.Errorf("RAG system not initialized, call InitializeRAG first")
+	}
+
+	ai.Logger.Info("Starting codebase indexing...")
+	if err := ai.indexer.IndexDirectory(ctx); err != nil {
+		ai.Logger.Error("Failed to index codebase", zap.Error(err))
+		return fmt.Errorf("failed to index codebase: %v", err)
+	}
+	ai.Logger.Info("Codebase indexing completed successfully")
+	return nil
+}
+
+// SearchCode performs a semantic search over the indexed codebase
+func (ai *AIClient) SearchCode(ctx context.Context, query string, limit int) ([]rag.SearchResult, error) {
+	if ai.indexer == nil {
+		return nil, fmt.Errorf("RAG system not initialized, call InitializeRAG first")
+	}
+
+	ai.Logger.Debug("Performing code search", zap.String("query", query), zap.Int("limit", limit))
+	results, err := ai.indexer.Search(ctx, query, limit)
+	if err != nil {
+		ai.Logger.Error("Failed to search code", zap.Error(err))
+		return nil, fmt.Errorf("failed to search code: %v", err)
+	}
+
+	ai.Logger.Debug("Code search completed", zap.Int("results_count", len(results)))
+	return results, nil
+}
+
+// UpdateCodeIndex updates the index with new or modified files
+func (ai *AIClient) UpdateCodeIndex(ctx context.Context, filePaths []string) error {
+	if ai.indexer == nil {
+		return fmt.Errorf("RAG system not initialized, call InitializeRAG first")
+	}
+
+	ai.Logger.Info("Updating index for modified files", zap.Strings("files", filePaths))
+	for _, path := range filePaths {
+		if err := ai.indexer.ProcessFile(ctx, path); err != nil {
+			ai.Logger.Error("Failed to update index for file", zap.String("file", path), zap.Error(err))
+			return fmt.Errorf("failed to update index for file %s: %v", path, err)
+		}
+	}
+
+	ai.Logger.Info("Index update completed successfully")
+	return nil
+}
+
+// CloseRAG closes the RAG system and its resources
+func (ai *AIClient) CloseRAG() error {
+	if ai.store != nil {
+		if err := ai.store.Close(); err != nil {
+			ai.Logger.Error("Failed to close ChromaDB store", zap.Error(err))
+			return fmt.Errorf("failed to close ChromaDB store: %v", err)
+		}
+	}
 	return nil
 }
